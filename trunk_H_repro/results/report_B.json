@@ -1,0 +1,80 @@
+{
+  "tuned_on_train": {
+    "radii_scale": 0.5,
+    "bins": 12,
+    "grid": 0.02,
+    "smooth": 1.2,
+    "core_frac": 0.3,
+    "top_k": 24,
+    "w_leaf": 0.0,
+    "lambda_shift": 1.8,
+    "dens_floor": 0.1,
+    "rad_q": 0.86,
+    "rad_scale": 0.9,
+    "margin_d": 0.15,
+    "rmin_d": 0.4,
+    "rmax_d": 3.0,
+    "rad_smooth": 1.4,
+    "w_branch": 1.0
+  },
+  "train": {
+    "scenes": 149,
+    "macro": {
+      "precision": 0.7091742646453647,
+      "recall": 0.6600119124882772,
+      "f1": 0.6751601603816966
+    },
+    "micro": {
+      "precision": 0.7079009947481274,
+      "recall": 0.6511003189849827,
+      "f1": 0.678313639335907,
+      "tp": 726654,
+      "fp": 299837,
+      "fn": 389386
+    },
+    "recall_below_60": 38,
+    "recall_below_50": 5,
+    "worst10pct_recall_mean": 0.5111511345759817,
+    "worst10pct_recall_min": 0.44878088692521684
+  },
+  "val": {
+    "scenes": 50,
+    "macro": {
+      "precision": 0.7143811857416925,
+      "recall": 0.646838707407411,
+      "f1": 0.6688247881408036
+    },
+    "micro": {
+      "precision": 0.7106239618916294,
+      "recall": 0.6338131708407871,
+      "f1": 0.6700243776316761,
+      "tp": 226753,
+      "fp": 92337,
+      "fn": 131007
+    },
+    "recall_below_60": 15,
+    "recall_below_50": 2,
+    "worst10pct_recall_mean": 0.46185247881470326,
+    "worst10pct_recall_min": 0.3385328836424958
+  },
+  "test": {
+    "scenes": 51,
+    "macro": {
+      "precision": 0.714484746626899,
+      "recall": 0.6610876630657431,
+      "f1": 0.6798461473382474
+    },
+    "micro": {
+      "precision": 0.711451763971277,
+      "recall": 0.6583614779460837,
+      "f1": 0.6838778024365687,
+      "tp": 227878,
+      "fp": 92422,
+      "fn": 118251
+    },
+    "recall_below_60": 15,
+    "recall_below_50": 1,
+    "worst10pct_recall_mean": 0.5461996168278773,
+    "worst10pct_recall_min": 0.4934010152284264
+  }
+}
