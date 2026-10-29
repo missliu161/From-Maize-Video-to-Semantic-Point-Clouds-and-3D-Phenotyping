@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-pipeline_full.py - 全自动流水线: 训练 → YOLO分割 → 跨帧匹配 → 语义点云
+pipeline_full.py - End-to-end pipeline: training → YOLO segmentation → cross-frame matching → semantic point cloud
 
-流程:
-  1. 训练2DGS模型（调用 train.py）
-  2. 分割 + 匹配 + GS-ID投票 + 导出语义点云（调用 pipeline_seg.py）
+Workflow:
+  1. Train the 2DGS model (calls train.py)
+  2. Segment, match, vote on GS IDs, and export a semantic point cloud (calls pipeline_seg.py)
 
-用法:
-  单文件夹:   python pipeline_full.py -s /path/to/dataset
-  批量模式:   python pipeline_full.py -s /path/to/parent --batch
-  仅推理:     python pipeline_full.py -s /path/to/dataset --skip_train
+Usage:
+  Single folder: python pipeline_full.py -s /path/to/dataset
+  Batch mode:    python pipeline_full.py -s /path/to/parent --batch
+  Inference only: python pipeline_full.py -s /path/to/dataset --skip_train
 
-说明:
-  - 模型训练输出到 <dataset_path>/output/，pipeline_seg.py 自动发现
-  - 所有参数都有默认值，直接 -s 即可运行
-  - 批量模式下自动检测每个子文件夹的模型，存在则跳过训练
-  - --skip_train 表示"强制跳过训练（即使无模型）"
+Notes:
+  - Training outputs are written to <dataset_path>/output/, which pipeline_seg.py finds automatically.
+  - All parameters have defaults; providing -s is sufficient to run the pipeline.
+  - In batch mode, existing models in child folders are detected and training is skipped.
+  - --skip_train means "force skipping training even when no model exists".
 """
 
 import sys
@@ -26,55 +26,52 @@ from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser(
-        description="全自动流水线: 训练 → YOLO分割 → 跨帧匹配 → 语义点云",
+        description="End-to-end pipeline: training → YOLO segmentation → cross-frame matching → semantic point cloud",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""示例:
-  python pipeline_full.py -s /path/to/B73-1_frames                     # 完整训练+分割
-  python pipeline_full.py -s /path/to/B73-1_frames --skip_train        # 强制跳过训练
-  python pipeline_full.py -s /path/to/parent --batch                    # 批量（自动跳过已训练）
-  python pipeline_full.py -s /path/to/data --iterations 30000 --quiet  # 静默模式
-  python pipeline_full.py -s /path/to/data --yolo_model /path/best.pt  # 指定YOLO
+        epilog="""Examples:
+  python pipeline_full.py -s /path/to/B73-1_frames                     # Full training and segmentation
+  python pipeline_full.py -s /path/to/B73-1_frames --skip_train        # Force skipping training
+  python pipeline_full.py -s /path/to/parent --batch                    # Batch mode (skip trained scenes)
+  python pipeline_full.py -s /path/to/data --iterations 30000 --quiet  # Quiet mode
+  python pipeline_full.py -s /path/to/data --yolo_model /path/best.pt  # Specify the YOLO model
 """)
 
-    # ── 核心路径 ──
     parser.add_argument("-s", "--source_path", required=True,
-                        help="数据文件夹路径（含images/和sparse/的COLMAP目录）")
+                        help="Data folder containing a COLMAP scene with images/ and sparse/")
     parser.add_argument("--batch", action="store_true",
-                        help="批量处理source_path下的所有子文件夹（自动跳过已训练的）")
+                        help="Process all child folders under source_path and skip trained scenes")
 
-    # ── 训练参数 ──
     parser.add_argument("--iterations", type=int, default=30000,
-                        help="训练迭代数（默认 30000）")
+                        help="Number of training iterations (default: 30000)")
     parser.add_argument("--skip_train", action="store_true",
-                        help="强制跳过训练（即使模型不存在也不训练）")
+                        help="Force skipping training even when the model does not exist")
     parser.add_argument("--lambda_normal", type=float, default=0.05,
-                        help="法向一致性损失权重")
+                        help="Normal-consistency loss weight")
     parser.add_argument("--lambda_dist", type=float, default=0.0,
-                        help="畸变损失权重")
+                        help="Distortion loss weight")
 
-    # ── 分割/匹配参数 ──
     parser.add_argument("--yolo_model", type=str, default="",
-                        help="YOLO模型路径（默认自动查找）")
+                        help="YOLO model path (found automatically by default)")
     parser.add_argument("--skip_yolo", action="store_true",
-                        help="跳过YOLO（掩码已存在时使用）")
+                        help="Skip YOLO when masks already exist")
     parser.add_argument("--conf", type=float, default=0.15,
-                        help="YOLO置信度阈值（默认 0.15）")
+                        help="YOLO confidence threshold (default: 0.15)")
     parser.add_argument("--spatial_threshold", type=float, default=1.5,
-                        help="空间匹配阈值（米，默认 1.5）")
+                        help="Spatial matching threshold in meters (default: 1.5)")
     parser.add_argument("--class2_start", type=int, default=222,
-                        help="class 2 起始全局ID")
+                        help="Starting global ID for class 2")
     parser.add_argument("--class3_start", type=int, default=300,
-                        help="class 3 起始全局ID")
+                        help="Starting global ID for class 3")
     parser.add_argument("--dbscan_eps", type=float, default=0.1,
-                        help="DBSCAN 邻域半径")
+                        help="DBSCAN neighborhood radius")
     parser.add_argument("--dbscan_min_samples", type=int, default=10,
-                        help="DBSCAN 最小样本数")
+                        help="Minimum number of DBSCAN samples")
     parser.add_argument("--skip_voting", action="store_true",
-                        help="跳过GS-ID投票和语义点云导出")
+                        help="Skip GS-ID voting and semantic point-cloud export")
     parser.add_argument("--output_subdir", type=str, default=None,
                          help="pipeline_seg output subdirectory (default: semantic_matchin)")
     parser.add_argument("--quiet", action="store_true",
-                        help="减少输出")
+                        help="Reduce output")
 
     args = parser.parse_args()
     script_dir = Path(__file__).parent.resolve()
@@ -83,7 +80,7 @@ def main():
     if args.batch:
         folders = sorted([d for d in src.iterdir() if d.is_dir()])
         if not folders:
-            print(f"❌ {src} 下没有子文件夹")
+            print(f"❌ No child folders found under {src}")
             sys.exit(1)
         for f in folders:
             _run_single(f, args, script_dir)
@@ -92,14 +89,14 @@ def main():
 
 
 def _check_ply(folder: Path, iterations: int):
-    """返回已训练模型的 point_cloud.ply 路径，若不存在返回 None。"""
+    """Return the trained point_cloud.ply path, or None if it does not exist."""
     candidate = folder / "output" / "point_cloud" / f"iteration_{iterations}" / "point_cloud.ply"
     return candidate if candidate.exists() else None
 
 
 def _looks_like_scene(folder: Path) -> bool:
-    """判定目录是否是 2DGS 训练所需的 COLMAP/Blender 场景根目录。
-    含 sparse/ 子目录或 transforms_train.json 视为有效场景。
+    """Return whether a folder is a COLMAP/Blender scene root for 2DGS training.
+    A sparse/ directory or transforms_train.json marks a valid scene.
     """
     return (folder / "sparse").exists() or (folder / "transforms_train.json").exists()
 
@@ -109,26 +106,25 @@ def _run_single(folder: Path, args, script_dir: Path):
 
     if not _looks_like_scene(folder):
         print(f"\n{'='*60}")
-        print(f"⏭ 跳过 {name}：不是 COLMAP/Blender 场景目录（缺少 sparse/ 或 transforms_train.json）")
+        print(f"⏭ Skipping {name}: not a COLMAP/Blender scene (missing sparse/ or transforms_train.json)")
         print(f"{'='*60}")
         return
 
-    # ─── Step 1: 训练 ───
     final_ply = _check_ply(folder, args.iterations)
 
     if final_ply is not None:
         need_train = False
-        skip_reason = f"检测到已有模型 {final_ply.name}，自动跳过训练"
+        skip_reason = f"existing model {final_ply.name} detected; skipping training"
     elif args.skip_train:
         need_train = False
-        skip_reason = "--skip_train 强制跳过（无模型）"
+        skip_reason = "--skip_train forced skipping because no model exists"
     else:
         need_train = True
         skip_reason = None
 
     if need_train:
         print(f"\n{'='*60}")
-        print(f"Step 1: 训练 2DGS — {name}")
+        print(f"Step 1: Train 2DGS — {name}")
         print(f"{'='*60}")
         model_dir = folder / "output"
         model_dir.mkdir(parents=True, exist_ok=True)
@@ -147,12 +143,11 @@ def _run_single(folder: Path, args, script_dir: Path):
         subprocess.run(train_cmd, check=True)
     else:
         print(f"\n{'='*60}")
-        print(f"Step 1: 跳过训练 — {name}（{skip_reason}）")
+        print(f"Step 1: Skip training — {name} ({skip_reason})")
         print(f"{'='*60}")
 
-    # ─── Step 2: 分割 + 匹配 + 投票 + 导出 ───
     print(f"\n{'='*60}")
-    print(f"Step 2: 分割 + 匹配 + 语义点云 — {name}")
+    print(f"Step 2: Segmentation + matching + semantic point cloud — {name}")
     print(f"{'='*60}")
 
     pipeline_cmd = [
@@ -178,35 +173,17 @@ def _run_single(folder: Path, args, script_dir: Path):
 
     subprocess.run(pipeline_cmd, check=True)
 
-    # ─── 完成 ───
     model_dir = folder / "output"
     out_subdir = args.output_subdir if args.output_subdir else "semantic_matchin"
     print(f"\n{'='*60}")
-    print(f"✅ 完成: {name}")
-    print(f"   模型: {model_dir}")
+    print(f"✅ Complete: {name}")
+    print(f"   Model: {model_dir}")
     if not args.skip_voting:
         ply_files = list((folder / out_subdir).glob("*point_cloud*.ply"))
         for pf in ply_files:
-            print(f"   点云: {pf}")
+            print(f"   Point cloud: {pf}")
     print(f"{'='*60}")
 
 
 if __name__ == "__main__":
     main()
-
-# # 完整训练+分割（单个数据集）
-# python pipeline_full.py -s /path/to/B73-1_frames
-
-# # 批量处理（自动跳过已训练）
-# python pipeline_full.py -s /path/to/parent --batch
-
-# # 只跑分割匹配（模型已存在）
-# python pipeline_full.py -s /path/to/B73-1_frames --skip_train
-
-# # 指定YOLO权重
-# python pipeline_full.py -s /path/to/data --yolo_model /path/best.pt
-
-# # 自定义匹配参数
-# python pipeline_full.py -s /path/to/data --skip_train \
-#     --spatial_threshold 1.0 \
-#     --output_subdir matching_variant

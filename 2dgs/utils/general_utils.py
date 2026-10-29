@@ -153,11 +153,6 @@ def create_rotation_matrix_from_direction_vector_batch(direction_vectors):
     rotation_matrices = torch.stack((v1, v2, direction_vectors), dim=-1)
     return rotation_matrices
 
-# from kornia.geometry import conversions
-# def normal_to_rotation(normals):
-#     rotations = create_rotation_matrix_from_direction_vector_batch(normals)
-#     rotations = conversions.rotation_matrix_to_quaternion(rotations,eps=1e-5, order=conversions.QuaternionCoeffOrder.WXYZ)
-#     return rotations
 
 
 def colormap(img, cmap='jet'):

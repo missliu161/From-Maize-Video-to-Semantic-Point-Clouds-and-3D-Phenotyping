@@ -1,19 +1,20 @@
 """
-pipeline_seg.py - 一体化语义分割重建流水线
+pipeline_seg.py - Integrated semantic segmentation and reconstruction pipeline
 
-YOLO分割 → 跨帧实例匹配(3D高斯质心) → GS-ID投票赋语义 → 导出语义点云
+YOLO segmentation → cross-frame instance matching (3D Gaussian centroids)
+→ GS-ID voting for semantic labels → semantic point-cloud export
 
-支持:
-  单文件夹: python pipeline_seg.py /path/to/folder [options]
-  批量处理: python pipeline_seg.py /path/to/parent_dir --batch [options]
+Supports:
+  Single folder: python pipeline_seg.py /path/to/folder [options]
+  Batch processing: python pipeline_seg.py /path/to/parent_dir --batch [options]
 
-流程:
-  1. YOLO分割 → masks_results/integer_masks/ + class_info
-  2. 渲染GS-ID图（仅一次，后续匹配+voting复用）
-  3. 计算实例3D质心 + 跨帧3D/GS联合匹配
-  4. 生成unified masks（全局一致实例ID）
-  5. GS-ID多数投票 → 每个高斯获得语义标签
-  6. 导出 point_cloud_object.ply（含object属性，自动过滤背景）
+Workflow:
+  1. YOLO segmentation → masks_results/integer_masks/ + class_info
+  2. Render the GS-ID map once and reuse it for matching and voting
+  3. Compute 3D instance centroids and perform joint 3D/GS cross-frame matching
+  4. Generate unified masks with globally consistent instance IDs
+  5. Use GS-ID majority voting to assign semantic labels to each Gaussian
+  6. Export point_cloud_object.ply with an object attribute and automatic background filtering
 """
 
 import os
@@ -41,32 +42,24 @@ except ImportError:
     YOLOModel = None
 
 
-# ───────────────────────── 默认常量 ─────────────────────────
-# YOLO分割参数 (方案A调优)
-YOLO_CONF = 0.15          # 原 0.25，更激进召回
+YOLO_CONF = 0.15
 YOLO_IOU = 0.45
 YOLO_MAX_DET = 30
-YOLO_IMGSZ = 1280         # 原 640，提升小目标检测
+YOLO_IMGSZ = 1280
 
-MIN_PIXELS = 10           # 原 5，过滤过小mask
+MIN_PIXELS = 10
 CENTROID_OUTLIER_MULT = 2.0
-SPATIAL_THRESHOLD = 1.5   # 原 2.0，紧缩距离阈值（PlanA最优）
+SPATIAL_THRESHOLD = 1.5
 
-# ──────────── YOLO 类别约定与 global ID 分配 ────────────
-# YOLO 模型实际类别顺序 (model.names):
-#   class 0 = ear       (固定 ID 220)
-#   class 1 = fruit     (内部类别 2, global ID 222+)
-#   class 2 = leaf      (内部类别 3, global ID 300+)
-#   class 3 = obj       (固定 ID 221)
-# 因此: leaf → global ID 300+, fruit → global ID 222+
-CLASS2_START_ID = 222   # fruit 起点
-CLASS3_START_ID = 300   # leaf 起点
+
+CLASS2_START_ID = 222   # Start of fruit IDs
+CLASS3_START_ID = 300   # Start of leaf IDs
 
 GS_OVERLAP_THRESHOLD = 0.05
 GS_IOU_THRESHOLD = 0.01
 GS_OVERLAP_DISTANCE_MULT = 2.0
-GS_OVERLAP_WEIGHT = 0.9    # 原 0.7，增强重叠权重
-GS_IOU_WEIGHT = 0.1       # 原 0.3，降低IoU权重
+GS_OVERLAP_WEIGHT = 0.9
+GS_IOU_WEIGHT = 0.1
 GS_NO_OVERLAP_DISTANCE_MULT = 0.5
 GS_NO_OVERLAP_FRAME_GAP = 12
 GS_NO_OVERLAP_PENALTY = 0.8
@@ -74,37 +67,31 @@ GS_NO_OVERLAP_PENALTY = 0.8
 DBSCAN_EPS = 0.1
 DBSCAN_MIN_SAMPLES = 10
 
-# ── EMA质心更新参数 ──
-# 使用指数滑动平均稳定参考质心，防止单帧抖动带偏
-EMA_ALPHA = 0.2                 # EMA更新系数（越小越稳定，0.1-0.3推荐）
+# Use an exponential moving average to stabilize reference centroids.
+EMA_ALPHA = 0.2                 # Smaller values are more stable; 0.1–0.3 recommended.
 
-# 固定 ID 分配 (YOLO class 0/3 不参与匹配, 写入 unified_masks 用固定 global ID)
 FIXED_CLASS_MAP = {0: 220, 3: 221}   # YOLO cls 0 (ear) → 220, cls 3 (obj) → 221
 FIXED_PALETTE = {220: (0, 0, 255), 221: (0, 255, 0)}
 
 # Association configuration used by the published workflow.
 MATCHING_CONFIG = {
-    # 维度 1：核心组件（核心算法：3D 距离 + GS 高斯重叠）
-    "use_3d_distance": True,          # False → 不用 3D 距离
-    "use_gs_overlap": True,           # False → 不用高斯重叠
-    "use_overlap": True,              # False → 不用 overlap
-    "use_iou": True,                  # False → 不用 IoU
-    "use_fallback": True,             # False → 无重叠时不 fallback 到距离匹配
+    "use_3d_distance": True,
+    "use_gs_overlap": True,
+    "use_overlap": True,
+    "use_iou": True,
+    "use_fallback": True,             # False → do not fall back to distance matching without overlap
 
-    # 维度 2：距离度量
     "dist_metric": "euclidean",       # "euclidean"|"manhattan"|"xy_only"
 
-    # 维度 3：GS 重叠权重
     "gs_overlap_weight": 0.9,
     "gs_iou_weight": 0.1,
 
-    # 维度 4：空间距离阈值
     "spatial_threshold": 1.5,
 
-    # 维度 5：EMA 系数（0 = 禁用 EMA，直接覆盖）
+    # 0 disables EMA and replaces the centroid directly.
     "ema_alpha": 0.2,
 
-    # 维度 6：过滤没有有效高斯贡献的背景像素
+    # Filter background pixels without valid Gaussian contributions.
     "alpha_threshold": 1e-3,
 }
 FIXED_PALETTE = {220: (0, 0, 255), 221: (0, 255, 0)}
@@ -122,8 +109,6 @@ _DISTINCT_COLORS_RGB = [
 DEFAULT_YOLO_PATH = os.environ.get(
     "YOLO_MODEL_PATH", str(Path(__file__).resolve().parent / "models" / "yolo_seg.pt")
 )
-# ───────────────────── 工具函数 ─────────────────────
-
 def extract_frame_number(filename: str) -> int:
     matches = re.findall(r'(\d+)', Path(filename).stem)
     return int(matches[-1]) if matches else -1
@@ -156,17 +141,15 @@ def find_model_dir(folder: Path):
 
 
 def _gid_to_color(gid):
-    """基于gid生成确定性颜色（同样的gid永远得到同样的颜色）。
+    """Generate a deterministic color from a global ID.
 
-    用于跨实验/跨序列比对：第一帧的同gid实例在不同实验里颜色一致，
-    便于直观看出匹配差异。
+    The same ID receives the same color across experiments and sequences,
+    making matching differences easy to inspect visually.
     """
     seed = (int(gid) * 2654435761) & 0xFFFFFFFF
     rng = np.random.RandomState(seed)
     return tuple(int(x) for x in rng.randint(50, 256, size=3))
 
-
-# ─────────── Step 1: YOLO 分割 ───────────
 
 def step_yolo_segmentation(model, images_dir: Path, output_dir: Path, quiet=False):
     int_mask_dir = output_dir / "integer_masks"
@@ -247,8 +230,6 @@ def step_yolo_segmentation(model, images_dir: Path, output_dir: Path, quiet=Fals
     return success, len(image_files)
 
 
-# ─────────── Step 2: 加载模型 + 渲染 GS-ID 图 ───────────
-
 def step_load_and_render(folder: Path, model_dir: Path, quiet=False):
     folder, model_dir = Path(folder).resolve(), Path(model_dir).resolve()
 
@@ -273,7 +254,7 @@ def step_load_and_render(folder: Path, model_dir: Path, quiet=False):
     bg_tensor = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
     if not quiet:
-        print(f"  加载模型: {model_dir}")
+        print(f"  Loading model: {model_dir}")
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians, load_iteration=-1, shuffle=False)
     train_cameras = scene.getTrainCameras()
@@ -281,14 +262,14 @@ def step_load_and_render(folder: Path, model_dir: Path, quiet=False):
     if not quiet:
         n_gs = gaussians._xyz.shape[0]
         n_cam = len(train_cameras)
-        print(f"  高斯点数: {n_gs}, 训练相机: {n_cam}")
+        print(f"  Gaussians: {n_gs}, training cameras: {n_cam}")
 
     if gaussians._object.numel() == 0:
         gaussians._object = torch.zeros(gaussians._xyz.shape[0],
                                          dtype=torch.long, device="cuda")
 
     if not quiet:
-        print(f"  渲染 GS-ID 图...")
+        print(f"  Rendering GS-ID maps...")
     gs_id_maps = []
     alpha_threshold = MATCHING_CONFIG.get("alpha_threshold", 1e-3)
     for cam in tqdm(train_cameras, desc="  render", disable=quiet):
@@ -304,8 +285,6 @@ def step_load_and_render(folder: Path, model_dir: Path, quiet=False):
 
     return gaussians, train_cameras, gs_id_maps, bg_tensor
 
-
-# ─────────── Step 3: 计算实例 3D 质心 ───────────
 
 def compute_instance_geometry(mask_region_mask, gs_id_map, pc):
     ys, xs = torch.where(mask_region_mask)
@@ -336,7 +315,7 @@ def compute_instance_geometry(mask_region_mask, gs_id_map, pc):
 
 
 def _resize_mask_to_gs(mask, gs_shape):
-    """E1 修复: 把 YOLO mask resize 到 GS-ID 图尺寸，避免像素错位。"""
+    """E1 fix: resize the YOLO mask to the GS-ID map size to prevent pixel shifts."""
     if mask.shape[:2] == gs_shape:
         return mask
     return cv2.resize(mask.astype(np.int32), (gs_shape[1], gs_shape[0]),
@@ -348,13 +327,12 @@ def step_compute_centroids(gaussians, train_cameras, gs_id_maps,
     all_instances = {}
     available_frames = set(yolo_masks)
 
-    for i, cam in enumerate(tqdm(train_cameras, desc="  质心", disable=quiet)):
+    for i, cam in enumerate(tqdm(train_cameras, desc="  centroids", disable=quiet)):
         fn = resolve_camera_frame(cam, i, available_frames)
         if fn not in yolo_masks:
             continue
         mask = yolo_masks[fn]
         gid_map = gs_id_maps[i]
-        # E1: 把 mask 缩放到 GS-ID 图尺寸
         if mask.shape[:2] != gid_map.shape[:2]:
             mask = _resize_mask_to_gs(mask, gid_map.shape)
         ci = class_info_map.get(fn)
@@ -377,21 +355,19 @@ def step_compute_centroids(gaussians, train_cameras, gs_id_maps,
                     "gaussian_ids": visible_ids,
                 }
     if not quiet:
-        print(f"  总实例-帧对: {len(all_instances)}")
+        print(f"  Instance-frame pairs: {len(all_instances)}")
     return all_instances
 
 
-# ─────────── Step 4: 跨帧匹配 ───────────
-
 def _weighted_dist(c1, c2):
     """
-    根据 MATCHING_CONFIG["dist_metric"] 选择距离度量。
+    Select the distance metric from MATCHING_CONFIG["dist_metric"].
 
     Args:
-        c1, c2: 3D坐标 (x, y, z) numpy数组
+        c1, c2: 3D coordinates (x, y, z) as NumPy arrays
 
     Returns:
-        float: 距离
+        float: distance
     """
     metric = MATCHING_CONFIG.get("dist_metric", "euclidean")
     if metric == "manhattan":
@@ -431,7 +407,8 @@ def _match_score(inst, ref, fn):
     gs_enabled = use_overlap or use_iou
 
     if gs_enabled:
-        # GS-only 模式必须有真实交集；零证据候选不能以 0 分进入分配。
+        # GS-only matching requires a real intersection; zero-evidence candidates
+        # must not enter assignment with a score of zero.
         if inst_ids and ref_ids:
             inter = len(inst_ids & ref_ids)
         else:
@@ -454,14 +431,14 @@ def _match_score(inst, ref, fn):
                     score -= gs_iou_w * iou
                 return score, dist, overlap, iou
 
-        # GS 证据缺失或不足时，只能通过受限 fallback 匹配。
+        # Missing or insufficient GS evidence allows only a constrained fallback match.
         if use_fallback and use_3d:
             fallback_score = _fallback_match_score(dist, ref, fn)
             if fallback_score is not None:
                 return fallback_score, dist, overlap, iou
         return None
 
-    # 只有明确关闭 GS 信号时，才执行纯距离匹配。
+    # Pure distance matching is used only when GS signals are explicitly disabled.
     if use_3d:
         if dist >= sp_t:
             return None
@@ -472,26 +449,26 @@ def _match_score(inst, ref, fn):
 
 def _update_reference(ref, inst, fn):
     """
-    使用EMA更新参考质心，保留历史质心用于长期重识别。
+    Update the reference centroid with EMA while retaining historical Gaussian IDs
+    for long-term re-identification.
 
-    改进点：
-      - 防止单帧YOLO分割抖动把参考质心带偏
-      - 保留短期适应能力，适合旋转视角变化
-      - 保留历史质心用于长期重识别
+    This prevents single-frame YOLO jitter from shifting the reference centroid,
+    preserves short-term adaptation to viewpoint changes, and retains historical
+    evidence for long-term re-identification.
     """
     inst_centroid = inst["centroid"]
     ema_alpha = MATCHING_CONFIG.get("ema_alpha", EMA_ALPHA)
 
     if "centroid" in ref and ref["centroid"] is not None:
         if ema_alpha > 0:
-            # EMA更新: ref = (1-alpha) * ref + alpha * inst
+            # EMA update: ref = (1-alpha) * ref + alpha * inst
             ref["centroid"] = ((1 - ema_alpha) * ref["centroid"]
                               + ema_alpha * inst_centroid)
         else:
-            # EMA 禁用，直接覆盖
+            # EMA disabled; overwrite directly
             ref["centroid"] = inst_centroid
     else:
-        # 第一次出现，直接赋值
+        # First observation; assign directly
         ref["centroid"] = inst_centroid
 
     ref["last_frame"] = fn
@@ -515,12 +492,12 @@ def step_matching(all_instances, ref_centroids,
         fn, local_id = key
         inst = all_instances[key]
         class_id = inst["class_id"]
-        # YOLO 类别过滤: 跳过 YOLO cls 0 (ear) 和 cls 3 (obj), 不参与跨帧匹配
+        # Filter YOLO classes: skip cls 0 (ear) and cls 3 (obj) for cross-frame matching.
         if class_id in (0, 3):
             continue
-        # YOLO 类别 → 内部匹配通道:
-        #   YOLO cls 1 (fruit) → cid 2 → 写入 gid 222+ (CLASS2_START_ID)
-        #   YOLO cls 2 (leaf)  → cid 3 → 写入 gid 300+ (CLASS3_START_ID)
+        # YOLO class → internal matching channel:
+        #   YOLO cls 1 (fruit) → cid 2 → write gid 222+ (CLASS2_START_ID)
+        #   YOLO cls 2 (leaf)  → cid 3 → write gid 300+ (CLASS3_START_ID)
         cid = 2 if class_id == 1 else (3 if class_id == 2 else 2)
         instances_by_frame_class[(fn, cid)].append(key)
 
@@ -558,8 +535,8 @@ def step_matching(all_instances, ref_centroids,
             inst = all_instances[key]
             class_id = inst["class_id"]
 
-            # 新 ID 分配: YOLO cls 1 (fruit) → class2_counter (gid 222+)
-            #            YOLO cls 2 (leaf)  → class3_counter (gid 300+)
+            # New IDs: YOLO cls 1 (fruit) → class2_counter (gid 222+)
+            #          YOLO cls 2 (leaf)  → class3_counter (gid 300+)
             if class_id == 1:
                 global_id = class2_counter
                 class2_counter += 1
@@ -579,11 +556,9 @@ def step_matching(all_instances, ref_centroids,
             }
 
     if not quiet:
-        print(f"  ✅ 匹配: {matched}, 新ID: {new_ids_count}")
+        print(f"  ✅ Matches: {matched}, new IDs: {new_ids_count}")
     return new_global_mapping, class2_counter, class3_counter
 
-
-# ─────────── Step 5: 生成 Unified Masks ───────────
 
 def step_generate_unified_masks(yolo_masks, class_info_map, new_global_mapping,
                                  output_dir, quiet=False):
@@ -616,7 +591,7 @@ def step_generate_unified_masks(yolo_masks, class_info_map, new_global_mapping,
         if gid in FIXED_PALETTE:
             id_colors[gid] = FIXED_PALETTE[gid]
         else:
-            # 确定性颜色：同gid在不同实验里颜色一致
+            # Deterministic color: the same ID has the same color across experiments.
             id_colors[gid] = _gid_to_color(gid)
 
     first_frame_lid_colors = {}
@@ -642,7 +617,7 @@ def step_generate_unified_masks(yolo_masks, class_info_map, new_global_mapping,
             if key in new_global_mapping:
                 id_colors[new_global_mapping[key]] = color
 
-    for fn in tqdm(sorted(yolo_masks), desc="  unified", disable=quiet):
+    for fn in tqdm(sorted(yolo_masks), desc="  unified masks", disable=quiet):
         ym = yolo_masks[fn]
         unified = np.zeros_like(ym, dtype=np.int32)
         colored = np.zeros((*ym.shape, 3), dtype=np.uint8)
@@ -684,8 +659,6 @@ def step_generate_unified_masks(yolo_masks, class_info_map, new_global_mapping,
 
     return unified_dir, id_colors
 
-
-# ─────────── Step 6: GS-ID 投票 ───────────
 
 def accumulate_counts(id_tensor, sem_mask, counts_total):
     if sem_mask.ndim == 3:
@@ -737,7 +710,7 @@ def remove_outlier_semantics(gaussians, eps=DBSCAN_EPS, min_samples=DBSCAN_MIN_S
 
 def step_gsid_voting(gaussians, train_cameras, gs_id_maps,
                       unified_dir, yolo_masks, quiet=False):
-    # 先扫描所有 unified masks 找到最大标签值，确定 num_classes
+    # Scan all unified masks to find the maximum label and determine num_classes.
     max_label = 0
     for fn in yolo_masks:
         p = unified_dir / f"unified_mask_{fn:04d}.png"
@@ -775,14 +748,12 @@ def step_gsid_voting(gaussians, train_cameras, gs_id_maps,
     gaussians._object = _object.clone()
 
     if not quiet:
-        print(f"  投票后标签数: {torch.unique(_object).numel()}")
+        print(f"  Labels after voting: {torch.unique(_object).numel()}")
     remove_outlier_semantics(gaussians, eps=DBSCAN_EPS, min_samples=DBSCAN_MIN_SAMPLES)
     if not quiet:
-        print(f"  去离群后标签数: {torch.unique(gaussians._object).numel()}")
+        print(f"  Labels after outlier removal: {torch.unique(gaussians._object).numel()}")
     return gaussians
 
-
-# ─────────── Step 7: 导出 ───────────
 
 def _object_palette_color(obj_id):
     if obj_id == 0:
@@ -807,7 +778,7 @@ def step_export_ply(gaussians, output_dir, quiet=False):
     path = output_dir / "point_cloud_object.ply"
     gaussians.save_ply(str(path))
     if not quiet:
-        print(f"  ✅ 语义点云: {path}")
+        print(f"  ✅ Semantic point cloud: {path}")
 
 
 def save_id_mapping(new_global_mapping, all_instances, yolo_masks,
@@ -877,8 +848,6 @@ def save_id_mapping(new_global_mapping, all_instances, yolo_masks,
         json.dump(MATCHING_CONFIG, f, indent=2)
 
 
-# ─────────── 处理单个文件夹 ───────────
-
 def process_single_folder(folder, yolo_model, skip_yolo=False, skip_voting=False, quiet=False, output_subdir=None):
     folder = Path(folder).resolve()
     name = folder.name
@@ -889,27 +858,26 @@ def process_single_folder(folder, yolo_model, skip_yolo=False, skip_voting=False
 
     images_dir = find_images_dir(folder)
     if images_dir is None:
-        print(f"  ❌ 未找到 images_real 或 images")
+        print(f"  ❌ Neither images_real nor images was found")
         return False
     model_dir = find_model_dir(folder)
     if model_dir is None:
-        print(f"  ❌ 未找到 output_* 模型目录")
+        print(f"  ❌ No output_* model directory was found")
         return False
 
-    # ── Step 1: YOLO ──
     mask_dir = folder / "masks_results"
     if skip_yolo:
         if not (mask_dir / "integer_masks").is_dir():
-            print(f"  ❌ --skip_yolo 需要已有 masks_results/integer_masks")
+            print(f"  ❌ --skip_yolo requires an existing masks_results/integer_masks directory")
             return False
         if not quiet:
-            print(f"  ⏭️  跳过 YOLO")
+            print(f"  ⏭️  Skipping YOLO")
     else:
         if not quiet:
-            print(f"  🔄 YOLO 分割...")
+            print(f"  🔄 YOLO segmentation...")
         ok, total = step_yolo_segmentation(yolo_model, images_dir, mask_dir, quiet)
         if ok == 0:
-            print(f"  ❌ YOLO 无结果")
+            print(f"  ❌ YOLO produced no results")
             return False
         if not quiet:
             print(f"  ✅ YOLO: {ok}/{total}")
@@ -917,10 +885,9 @@ def process_single_folder(folder, yolo_model, skip_yolo=False, skip_voting=False
     int_mask_dir = mask_dir / "integer_masks"
     mask_files = sorted(int_mask_dir.glob("mask_*.png"))
     if not mask_files:
-        print(f"  ❌ 无掩码文件")
+        print(f"  ❌ No mask files found")
         return False
 
-    # ── 加载 YOLO 数据 ──
     class_info_map = {}
     for cp in int_mask_dir.glob("class_info_*.json"):
         fn = extract_frame_number(cp.name)
@@ -929,7 +896,7 @@ def process_single_folder(folder, yolo_model, skip_yolo=False, skip_voting=False
                 class_info_map[fn] = json.load(f)
 
     yolo_masks = {}
-    for mf in tqdm(mask_files, desc="  加载掩码", disable=quiet):
+    for mf in tqdm(mask_files, desc="  loading masks", disable=quiet):
         fn = extract_frame_number(mf.name)
         mask = cv2.imread(str(mf), cv2.IMREAD_UNCHANGED)
         if mask is None:
@@ -938,29 +905,25 @@ def process_single_folder(folder, yolo_model, skip_yolo=False, skip_voting=False
             mask = mask[:, :, 0]
         yolo_masks[fn] = mask.astype(np.int32)
     if not quiet:
-        print(f"  帧数: {len(yolo_masks)}")
+        print(f"  Frames: {len(yolo_masks)}")
 
-    # ── Step 2: 渲染 GS-ID ──
     gaussians, train_cameras, gs_id_maps, bg_tensor = \
         step_load_and_render(folder, model_dir, quiet)
 
-    # ── Step 3: 计算质心 ──
     all_instances = step_compute_centroids(
         gaussians, train_cameras, gs_id_maps, yolo_masks, class_info_map, quiet
     )
     if not all_instances:
-        print(f"  ❌ 无有效实例")
+        print(f"  ❌ No valid instances found")
         return False
 
-    # ── Step 4: 匹配 ──
     c2_ct = CLASS2_START_ID
     c3_ct = CLASS3_START_ID
-    ref_centroids = {}  # 冷启动：每个序列独立匹配，不跨序列加载历史
+    ref_centroids = {}  # Cold start: match each sequence independently without loading history.
     mapping, c2_ct, c3_ct = step_matching(
         all_instances, ref_centroids, c2_ct, c3_ct, quiet
     )
 
-    # ── Step 5: 生成 unified ──
     if output_subdir:
         out_dir = Path(output_subdir) if Path(output_subdir).is_absolute() else folder / output_subdir
     else:
@@ -969,13 +932,11 @@ def process_single_folder(folder, yolo_model, skip_yolo=False, skip_voting=False
         yolo_masks, class_info_map, mapping, out_dir, quiet
     )
 
-    # ── Step 6: GS-ID 投票 ──
     if not skip_voting:
         gaussians = step_gsid_voting(
             gaussians, train_cameras, gs_id_maps, unified_dir, yolo_masks, quiet
         )
 
-        # ── Step 7: 导出 ──
         step_export_ply(gaussians, out_dir, quiet)
     else:
         gaussians._object = torch.zeros(gaussians._xyz.shape[0],
@@ -984,12 +945,10 @@ def process_single_folder(folder, yolo_model, skip_yolo=False, skip_voting=False
     save_id_mapping(mapping, all_instances, yolo_masks, out_dir, quiet)
 
     if not quiet:
-        print(f"  ✅ {name} 完成")
+        print(f"  ✅ {name} complete")
         print(f"  📂 {out_dir}")
     return True
 
-
-# ───────────────────── 主入口 ─────────────────────
 
 def main():
     global YOLO_CONF, SPATIAL_THRESHOLD, CLASS2_START_ID, CLASS3_START_ID
@@ -997,25 +956,25 @@ def main():
     global MATCHING_CONFIG
 
     parser = ArgumentParser(
-        description="一体化流水线: YOLO分割 → 匹配 → GS-ID投票 → 语义点云")
-    parser.add_argument("folder", type=str, help="数据文件夹路径")
+        description="Integrated pipeline: YOLO segmentation → matching → GS-ID voting → semantic point cloud")
+    parser.add_argument("folder", type=str, help="Data folder path")
     parser.add_argument("--batch", action="store_true",
-                        help="批量处理子文件夹")
+                        help="Process child folders in batch")
     parser.add_argument("--yolo_model", type=str, default=None,
-                        help="YOLO权重路径")
+                        help="YOLO weights path")
     parser.add_argument("--skip_yolo", action="store_true",
-                        help="跳过YOLO，使用已有掩码")
+                        help="Skip YOLO and use existing masks")
     parser.add_argument("--skip_voting", action="store_true",
-                        help="跳过GS-ID投票和语义点云导出（只做分割+匹配）")
+                        help="Skip GS-ID voting and semantic point-cloud export (segmentation and matching only)")
     parser.add_argument("--output_subdir", type=str, default=None,
                         help="Output subdirectory (default: semantic_matchin)")
     parser.add_argument("--quiet", action="store_true")
 
     parser.add_argument("--conf", type=float, default=YOLO_CONF)
     parser.add_argument("--spatial_threshold", type=float, default=None,
-                        help="覆盖跨帧匹配的空间距离阈值")
+                        help="Override the cross-frame spatial matching threshold")
     parser.add_argument("--alpha_threshold", type=float, default=None,
-                        help="显式覆盖GS渲染alpha有效性阈值")
+                        help="Explicitly override the GS-rendering alpha validity threshold")
     parser.add_argument("--class2_start", type=int, default=CLASS2_START_ID)
     parser.add_argument("--class3_start", type=int, default=CLASS3_START_ID)
     parser.add_argument("--dbscan_eps", type=float, default=DBSCAN_EPS)
@@ -1038,21 +997,20 @@ def main():
 
     folder = Path(args.folder)
     if not folder.is_dir():
-        print(f"❌ 不存在: {folder}")
+        print(f"❌ Does not exist: {folder}")
         sys.exit(1)
 
-    # ── YOLO 模型；复用已有 masks 时无需加载 ──
     yolo_model = None
     if not args.skip_yolo:
         if YOLOModel is None:
-            print("❌ 请安装 ultralytics: pip install ultralytics")
+            print("❌ Install ultralytics: pip install ultralytics")
             sys.exit(1)
 
         yolo_path = args.yolo_model
         if yolo_path is None:
             yolo_path = DEFAULT_YOLO_PATH if os.path.exists(DEFAULT_YOLO_PATH) else None
         if yolo_path is None or not os.path.exists(yolo_path):
-            print(f"❌ YOLO模型不存在，用 --yolo_model 指定")
+            print(f"❌ YOLO model not found; specify it with --yolo_model")
             sys.exit(1)
 
         if not args.quiet:
@@ -1063,17 +1021,16 @@ def main():
 
     skip_voting = args.skip_voting
 
-    # ── 处理 ──
     if args.batch:
         subs = sorted([
             d for d in folder.iterdir()
             if d.is_dir() and find_images_dir(d) and find_model_dir(d)
         ])
         if not subs:
-            print(f"❌ 无有效子文件夹")
+            print(f"❌ No valid child folders found")
             sys.exit(1)
         if not args.quiet:
-            print(f"📂 批量: {len(subs)} 个")
+            print(f"📂 Batch: {len(subs)} folder(s)")
         ok = 0
         for sf in subs:
             try:
@@ -1086,7 +1043,7 @@ def main():
                 traceback.print_exc()
         if not args.quiet:
             print(f"\n{'='*60}")
-            print(f"🎉 {ok}/{len(subs)} 完成")
+            print(f"🎉 Complete: {ok}/{len(subs)}")
             print(f"{'='*60}")
     else:
         process_single_folder(folder, yolo_model, args.skip_yolo, args.skip_voting,
@@ -1095,6 +1052,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-# python pipeline_seg.py /path/to/scenes --batch

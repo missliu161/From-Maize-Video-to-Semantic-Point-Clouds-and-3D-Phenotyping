@@ -1,25 +1,22 @@
 """
-按质心球过滤点云 + DBSCAN 保留最大连通簇去离群点。
-
-对每个数据子文件夹：
+Filter the point cloud with a centroid-centered sphere and use DBSCAN to keep
+the largest connected cluster.
+For each scene subdirectory:
   1. Read semantic_matchin/point_cloud_object_post.ply and compute its centroid.
-  2. 读取 output/point_cloud/iteration_30000/point_cloud.ply。
-  3. 仅保留以 A 为球心、半径 2 范围内的点，在内存中暂存裁剪结果。
-  4. (可选, 默认开启) 对上一步结果做 DBSCAN，仅保留最大连通簇，
-     写为 point_cloud_sphere_denoised.ply。
+   2. Read output/point_cloud/iteration_30000/point_cloud.ply.
+   3. Keep only points within radius 2 of the centroid and hold the crop in memory.
+   4. Optionally (enabled by default), run DBSCAN on the crop, keep the largest
+      connected cluster, and write point_cloud_sphere_denoised.ply.
 
-支持批量处理（指定父目录）和单文件夹处理（直接指定子文件夹）。
+Supports batch processing (a parent directory) and single-scene processing.
 
 Example:
-    # 批量处理 (球裁剪 + DBSCAN)
     python sphere_crop_by_centroid.py \\
         /path/to/scenes
 
-    # 单文件夹处理
     python sphere_crop_by_centroid.py \\
         /path/to/scenes/scene1
 
-    # 不执行 DBSCAN（裁剪结果也不会写入文件）
     python sphere_crop_by_centroid.py \\
         /path/to/scenes \\
         --no-denoise
@@ -40,19 +37,19 @@ DENOISED_PLY_NAME = "point_cloud_sphere_denoised.ply"
 
 
 def compute_centroid(ply_path: Path) -> np.ndarray:
-    """读取 PLY，返回 xyz 质心。"""
+    """Read a PLY file and return the xyz centroid."""
     ply = PlyData.read(str(ply_path))
     vertex_data = ply["vertex"].data
     xyz = np.stack(
         [vertex_data["x"], vertex_data["y"], vertex_data["z"]], axis=1
     ).astype(np.float64)
     if xyz.shape[0] == 0:
-        raise ValueError(f"{ply_path} 中没有顶点")
+        raise ValueError(f"{ply_path} contains no vertices")
     return xyz.mean(axis=0)
 
 
 def filter_ply_vertices(ply: PlyData, keep_mask: np.ndarray) -> PlyData:
-    """按掩码筛选顶点，并保留 PLY 元数据及其他元素。"""
+    """Filter vertices by a mask while preserving PLY metadata and other elements."""
     pv = ply["vertex"]
     new_v = pv[keep_mask]
     new_el = PlyElement.describe(new_v, "vertex")
@@ -67,9 +64,9 @@ def filter_ply_vertices(ply: PlyData, keep_mask: np.ndarray) -> PlyData:
 
 
 def sphere_crop_ply(src_ply: Path, center: np.ndarray, radius: float) -> tuple:
-    """保留 src_ply 中距离 center <= radius 的点，在内存中返回裁剪结果。
+    """Keep points in src_ply with distance <= radius from center in memory.
 
-    返回 (裁剪后的 PlyData, n_before, n_after)。
+    Return (cropped PlyData, n_before, n_after).
     """
     ply = PlyData.read(str(src_ply))
     vertex_data = ply["vertex"].data
@@ -79,7 +76,7 @@ def sphere_crop_ply(src_ply: Path, center: np.ndarray, radius: float) -> tuple:
     n_before = xyz.shape[0]
 
     if n_before == 0:
-        raise ValueError(f"{src_ply} 中没有顶点")
+        raise ValueError(f"{src_ply} contains no vertices")
 
     dist = np.linalg.norm(xyz - center, axis=1)
     keep_mask = dist <= radius
@@ -89,7 +86,9 @@ def sphere_crop_ply(src_ply: Path, center: np.ndarray, radius: float) -> tuple:
 
 
 def normalize_xyz(xyz: np.ndarray) -> tuple:
-    """按 bbox 对角线长度做各向同性缩放到 [0,1] 量级。返回 (xyz_norm, scale, center)。"""
+    """Normalize isotropically by the bounding-box diagonal and return
+    (xyz_norm, scale, center).
+    """
     center = xyz.mean(axis=0)
     centered = xyz - center
     diag = np.linalg.norm(centered.max(axis=0) - centered.min(axis=0))
@@ -99,14 +98,14 @@ def normalize_xyz(xyz: np.ndarray) -> tuple:
 
 def denoise_dbscan(ply: PlyData, eps: float, min_samples: int,
                    normalize_bbox: bool, dst_ply: Path) -> dict:
-    """DBSCAN 聚类，保留最大簇；返回统计信息 dict。"""
+    """Run DBSCAN, keep the largest cluster, and return summary statistics."""
     vertex_data = ply["vertex"].data
     xyz = np.stack(
         [vertex_data["x"], vertex_data["y"], vertex_data["z"]], axis=1
     ).astype(np.float64)
     n_before = xyz.shape[0]
     if n_before == 0:
-        raise ValueError("球裁剪结果中没有顶点")
+        raise ValueError("The sphere crop contains no vertices")
 
     if normalize_bbox:
         xyz_for_cluster, _scale, _center = normalize_xyz(xyz)
@@ -147,31 +146,31 @@ def process_scene(scene_dir: Path, radius: float, overwrite: bool = False,
                   dbscan_min_samples: int = 20,
                   dbscan_normalize_bbox: bool = False,
                   denoised_name: str = DENOISED_PLY_NAME) -> bool:
-    """处理单个场景目录。返回 True 表示成功。"""
+    """Process one scene directory and return True on success."""
     centroid_ply = scene_dir / CENTROID_PLY_RELPATH
     source_ply = scene_dir / SOURCE_PLY_RELPATH
     denoised_ply = scene_dir / denoised_name
 
     if not centroid_ply.exists():
-        print(f"  ⚠️  缺少质心 PLY: {centroid_ply}")
+        print(f"  ⚠️  Missing centroid PLY: {centroid_ply}")
         return False
     if not source_ply.exists():
-        print(f"  ⚠️  缺少源 PLY: {source_ply}")
+        print(f"  ⚠️  Missing source PLY: {source_ply}")
         return False
 
     if do_denoise and denoised_ply.exists() and not overwrite:
-        print(f"  ⏭️  DBSCAN 输出已存在，跳过: {denoised_ply}（用 --overwrite 覆盖）")
+        print(f"  ⏭️  DBSCAN output already exists; skipping: {denoised_ply} (use --overwrite to replace)")
         return True
 
     try:
         center = compute_centroid(centroid_ply)
         cropped_ply, n_before, n_cropped = sphere_crop_ply(source_ply, center, radius)
         print(
-            f"  ✅ {scene_dir.name}: 质心=({center[0]:.4f},{center[1]:.4f},{center[2]:.4f}) "
-            f"r={radius} → {n_before} -> {n_cropped} 点（裁剪结果仅保留在内存中）"
+            f"  ✅ {scene_dir.name}: centroid=({center[0]:.4f},{center[1]:.4f},{center[2]:.4f}) "
+            f"r={radius} → {n_before} -> {n_cropped} points (crop kept in memory only)"
         )
         if not do_denoise:
-            print("  ℹ️  DBSCAN 已跳过；未保存裁剪中间点云")
+            print("  ℹ️  DBSCAN skipped; the intermediate crop was not saved")
             return True
 
         info = denoise_dbscan(cropped_ply, dbscan_eps, dbscan_min_samples,
@@ -180,17 +179,17 @@ def process_scene(scene_dir: Path, radius: float, overwrite: bool = False,
             f"  🧹 DBSCAN: eps={dbscan_eps} min_samples={dbscan_min_samples} "
             f"normalize_bbox={dbscan_normalize_bbox} "
             f"biggest_cluster=#{info['biggest_label']}({info['biggest_size']} pts) "
-            f"noise={info['n_noise']} → {info['n_before']} -> {info['n_after']} 点"
+            f"noise={info['n_noise']} → {info['n_before']} -> {info['n_after']} points"
         )
-        print(f"     保存到: {denoised_ply}")
+        print(f"     Saved to: {denoised_ply}")
         return True
     except Exception as exc:
-        print(f"  ❌ {scene_dir.name} DBSCAN 失败: {exc}")
+        print(f"  ❌ DBSCAN failed for {scene_dir.name}: {exc}")
         return False
 
 
 def collect_scenes(path: Path) -> list:
-    """path 是父目录时返回其下所有场景；path 本身是场景目录时返回 [path]。"""
+    """Return child scenes for a parent path, or [path] when path is a scene."""
     if (path / CENTROID_PLY_RELPATH).exists() and (path / SOURCE_PLY_RELPATH).exists():
         return [path]
     scenes = []
@@ -210,9 +209,9 @@ def main():
                     "optionally keep the largest DBSCAN cluster."
     )
     parser.add_argument("path", type=str,
-                        help="父目录（批量处理）或单个场景子目录")
+                        help="Parent directory for batch processing or one scene directory")
     parser.add_argument("--radius", type=float, default=2.0,
-                        help="球半径（默认 2.0）")
+                        help="Sphere radius (default: 2.0)")
     parser.add_argument("--overwrite", action="store_true",
                          help="Overwrite existing output files")
     parser.add_argument("--no-denoise", action="store_true",
@@ -229,22 +228,22 @@ def main():
 
     target = Path(args.path).resolve()
     if not target.exists():
-        print(f"❌ 路径不存在: {target}")
+        print(f"❌ Path does not exist: {target}")
         sys.exit(1)
 
     scenes = collect_scenes(target)
     if not scenes:
-        print(f"❌ 在 {target} 下未找到任何含 "
-              f"{CENTROID_PLY_RELPATH} 和 {SOURCE_PLY_RELPATH} 的子目录")
+        print(f"❌ No child scene containing "
+              f"{CENTROID_PLY_RELPATH} and {SOURCE_PLY_RELPATH} was found under {target}")
         sys.exit(1)
 
-    mode = "单文件夹" if len(scenes) == 1 and scenes[0] == target else "批量"
-    print(f"📂 {mode}处理 {len(scenes)} 个场景，r={args.radius}")
+    mode = "single-scene" if len(scenes) == 1 and scenes[0] == target else "batch"
+    print(f"📂 {mode} processing: {len(scenes)} scene(s), r={args.radius}")
     if not args.no_denoise:
         print(f"   DBSCAN: eps={args.denoise_eps} min_samples={args.denoise_min_samples} "
               f"normalize_bbox={args.denoise_normalize_bbox}")
     else:
-        print("   DBSCAN: 跳过（--no-denoise）")
+        print("   DBSCAN: skipped (--no-denoise)")
     for s in scenes:
         print(f"  - {s}")
 
@@ -267,12 +266,9 @@ def main():
             fail += 1
 
     print(f"\n{'='*60}")
-    print(f"🎉 完成: {ok} 成功 / {fail} 失败")
+    print(f"🎉 Complete: {ok} succeeded / {fail} failed")
     print(f"{'='*60}")
 
 
 if __name__ == "__main__":
     main()
-
-
-# python remove_background.py /path/to/scenes

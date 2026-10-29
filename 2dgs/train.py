@@ -28,7 +28,6 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
-#############
 import numpy as np
 import os
 import torchvision
@@ -37,33 +36,28 @@ import matplotlib.pyplot as plt
 def save_image_and_gsid(image, gs_id, step, save_dir):
     os.makedirs(save_dir, exist_ok=True)
 
-    # 保存 image（假设 image 为 C×H×W 或 H×W×C，值域为 [0,1] 或 [0,255]）
     if isinstance(image, torch.Tensor):
-        if image.ndim == 3 and image.shape[0] in [1, 3]:  # C×H×W
+        if image.ndim == 3 and image.shape[0] in [1, 3]:
             img_path = os.path.join(save_dir, f"image_{step:05d}.png")
             torchvision.utils.save_image(image, img_path)
-        elif image.ndim == 2:  # H×W 灰度图
+        elif image.ndim == 2:
             img_path = os.path.join(save_dir, f"image_{step:05d}.png")
             TF.to_pil_image(image).save(img_path)
         else:
             raise ValueError(f"Unexpected image shape: {image.shape}")
     
-    # 可视化 gs_id：为每个 gs_id 分配一个颜色
-    gs_id_np = gs_id.detach().cpu().numpy()  # H×W
+    gs_id_np = gs_id.detach().cpu().numpy()
     unique_ids = np.unique(gs_id_np)
 
-    # 生成 ID → RGB 映射（T-G-G-B）
     def id_to_tggb_color(id):
         np.random.seed(id)
         return np.random.randint(0, 256, size=3, dtype=np.uint8)
 
     color_map = {i: id_to_tggb_color(i) for i in unique_ids}
-    gs_color = np.stack([np.array([color_map[i] for i in row]) for row in gs_id_np], axis=0)  # H×W×3
+    gs_color = np.stack([np.array([color_map[i] for i in row]) for row in gs_id_np], axis=0)
 
-    # 保存 gs_id 可视化图
     gsid_img_path = os.path.join(save_dir, f"gsid_{step:05d}.png")
     plt.imsave(gsid_img_path, gs_color)
-#############
 
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
@@ -94,25 +88,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         iter_start.record()
         gaussians.update_learning_rate(iteration)
 
-        # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
 
-        # Pick a random Camera
         if not viewpoint_stack:
             viewpoint_stack = scene.getTrainCameras().copy()
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
         render_pkg = render(viewpoint_cam, gaussians, pipe, background)
         image, viewspace_point_tensor, visibility_filter, radii, gs_id = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"], render_pkg["gs_id"]
         
-        # if iteration % 200 == 0:
-        #     save_image_and_gsid(image, gs_id, iteration, save_dir="./output_images")
-
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
         
-        # regularization
         lambda_normal = opt.lambda_normal if iteration > 7000 else 0.0
         lambda_dist = opt.lambda_dist if iteration > 3000 else 0.0
 
@@ -123,7 +111,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         normal_loss = lambda_normal * (normal_error).mean()
         dist_loss = lambda_dist * (rend_dist).mean()
 
-        # loss
         total_loss = loss + dist_loss + normal_loss
         
         total_loss.backward()
@@ -131,7 +118,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         iter_end.record()
 
         with torch.no_grad():
-            # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             ema_dist_for_log = 0.4 * dist_loss.item() + 0.6 * ema_dist_for_log
             ema_normal_for_log = 0.4 * normal_loss.item() + 0.6 * ema_normal_for_log
@@ -150,7 +136,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration == opt.iterations:
                 progress_bar.close()
 
-            # Log and save
             if tb_writer is not None:
                 tb_writer.add_scalar('train_loss_patches/dist_loss', ema_dist_for_log, iteration)
                 tb_writer.add_scalar('train_loss_patches/normal_loss', ema_normal_for_log, iteration)
@@ -161,7 +146,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 scene.save(iteration)
 
 
-            # Densification
             if iteration < opt.densify_until_iter:
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
@@ -173,7 +157,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
 
-            # Optimizer step
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
@@ -196,14 +179,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     metrics_dict = {
                         "#": gaussians.get_opacity.shape[0],
                         "loss": ema_loss_for_log
-                        # Add more metrics as needed
                     }
-                    # Send the data
                     network_gui.send(net_image_bytes, dataset.source_path, metrics_dict)
                     if do_training and ((iteration < int(opt.iterations)) or not keep_alive):
                         break
                 except Exception as e:
-                    # raise e
                     network_gui.conn = None
 
 def prepare_output_and_logger(args):    
@@ -214,7 +194,6 @@ def prepare_output_and_logger(args):
             unique_str = str(uuid.uuid4())
         args.model_path = os.path.join("./output/", unique_str[0:10])
         
-    # Set up output folder
     print("Output folder: {}".format(args.model_path))
     os.makedirs(args.model_path, exist_ok = True)
     with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:

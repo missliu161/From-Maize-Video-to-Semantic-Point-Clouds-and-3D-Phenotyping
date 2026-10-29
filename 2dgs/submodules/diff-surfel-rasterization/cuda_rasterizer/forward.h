@@ -66,7 +66,7 @@ namespace FORWARD
 		const float* bg_color,
 		float* out_color,
 		float* out_others,
-		int* max_contrib_gs_id   // 新增参数
+        int* max_contrib_gs_id   // Added parameter
 		);
 }
 

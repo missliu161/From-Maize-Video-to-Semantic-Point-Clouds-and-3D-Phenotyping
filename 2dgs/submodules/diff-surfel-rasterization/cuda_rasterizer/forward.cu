@@ -270,7 +270,7 @@ renderCUDA(
 	const float* __restrict__ bg_color,
 	float* __restrict__ out_color,
 	float* __restrict__ out_others,
-	int* __restrict__ max_contrib_gs_id  // <-- 新增参数
+  int* __restrict__ max_contrib_gs_id  // <-- Added parameter
 )
 {
 	// Identify current tile and associated min/max pixel range.
@@ -444,7 +444,7 @@ renderCUDA(
 	if (inside)
 	{
 		final_T[pix_id] = T;
-		max_contrib_gs_id[pix_id] = idx_max;  // <-- 输出最大贡献者 ID
+  max_contrib_gs_id[pix_id] = idx_max;  // <-- Store the ID of the maximum contributor
 		n_contrib[pix_id] = last_contributor;
 		for (int ch = 0; ch < CHANNELS; ch++)
 			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];

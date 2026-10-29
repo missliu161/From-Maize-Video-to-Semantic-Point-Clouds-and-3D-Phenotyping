@@ -86,7 +86,7 @@ RasterizeGaussiansCUDA(
   torch::Tensor out_others = torch::full({3+3+1, H, W}, 0.0, float_opts);
   torch::Tensor radii = torch::full({P}, 0, means3D.options().dtype(torch::kInt32));
 
-  torch::Tensor max_contrib_gs_id = torch::full({H, W}, -1, int_opts);  // 新增部分
+  torch::Tensor max_contrib_gs_id = torch::full({H, W}, -1, int_opts);  // Added output tensor.
   
   torch::Device device(torch::kCUDA);
   torch::TensorOptions options(torch::kByte);
@@ -130,7 +130,7 @@ RasterizeGaussiansCUDA(
 		out_color.contiguous().data<float>(),
 		out_others.contiguous().data<float>(),
 		radii.contiguous().data<int>(),
-		max_contrib_gs_id.contiguous().data<int>(),  // 新增传参
+        max_contrib_gs_id.contiguous().data<int>(),  // Pass the new output tensor.
 		debug);
   }
   return std::make_tuple(rendered, out_color, out_others, radii, max_contrib_gs_id, geomBuffer, binningBuffer, imgBuffer);

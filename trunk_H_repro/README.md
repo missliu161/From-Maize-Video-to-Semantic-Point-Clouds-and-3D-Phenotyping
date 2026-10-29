@@ -1,14 +1,14 @@
-# 主干提取模型推理（H-v3）
+# Trunk Model Inference (H-v3)
 
-此目录提供完整流程所需的预训练 H-v3 主干提取模型，以及对新场景执行特征计算和推理的代码。这里的 H-v3 是当前模型/方法版本标识。发布包不包含训练数据和训练缓存，也不提供模型重训流程。
+This directory provides the pretrained H-v3 trunk-extraction model and the code required to compute features and run inference on new scenes. H-v3 identifies the model and method version used here. The release package does not contain training data or training caches and does not provide a model-retraining workflow.
 
-主流程由 `2dgs/phenotype_from_semantic_b.py` 自动调用 `code/infer_H_model.py`。需要：
+The main workflow automatically calls `code/infer_H_model.py` from `2dgs/phenotype_from_semantic_b.py`. It requires:
 
-- `results/model_H_final.pkl`：预训练 H 模型。
-- `results/report_B.json`：特征计算所需的 B 几何配置。
-- 当前场景的完整去噪点云和后处理语义点云。
+- `results/model_H_final.pkl`: the pretrained H model.
+- `results/report_B.json`: the B geometry configuration required for feature computation.
+- The current scene's full denoised point cloud and post-processed semantic point cloud.
 
-通常无需直接运行推理脚本；如需单独调用，可在发布包根目录执行：
+The inference script normally does not need to be run directly. To call it separately, run the following command from the package root:
 
 ```bash
 python trunk_H_repro/code/infer_H_model.py \
@@ -17,4 +17,4 @@ python trunk_H_repro/code/infer_H_model.py \
   --output /path/to/point_cloud_trunk.ply
 ```
 
-模型文件是 pickle 格式，只应加载从项目发布渠道取得且校验通过的文件。模型下载与 SHA-256 信息将在发布模型资产时补充。
+The model file is a Python pickle and should only be loaded after it has been obtained from an approved project release channel and its checksum has been verified. Model download and SHA-256 information are documented in the root [README](../README.md).

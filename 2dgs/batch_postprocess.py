@@ -1,6 +1,5 @@
 """
 Batch post-process multiple scenes under a parent directory.
-
 For each subfolder containing semantic_matchin/point_cloud_object.ply,
 calls postprocess_object_ply.py with the same arguments.
 
@@ -363,7 +362,7 @@ def main():
                         help="List scenes and args without processing")
     parser.add_argument("--max-failures", type=int, default=5,
                         help="Stop after this many consecutive failures")
-    parser.add_argument("--sphere-radius", type=float, default=2.0,     #1.8
+    parser.add_argument("--sphere-radius", type=float, default=2.0,
                         help="Radius of the centroid sphere used to keep points "
                              "in the post-processed PLY. Points farther than this "
                              "from the cloud centroid are dropped. Set to 0 to disable.")
@@ -563,7 +562,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-# Example: python batch_postprocess.py /path/to/scenes --enable-local-relabel
